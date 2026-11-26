@@ -13,7 +13,7 @@ use AstrX\Http\Request;
  *   rewrite:  /<locale>/[api/][<sid>/]<page>/<tail…>
  *             (the locale segment is optional; without it the first segment
  *             is the page and every later one stays in the tail)
- *   query:    ?<locale_key>=en&<session_key>=…&<page_key>=…[&api=1]
+ *   query:    ?<locale_key>=en&<session_key>=…&<page_key>=<page>[/<tail…>][&api=1]
  *
  * A session id is only taken from the URL in cookieless mode, and only when
  * it matches Session.session_id_regex. The parsed values are also written
@@ -148,6 +148,14 @@ final class RouteParser
 
         $rawPage   = $request->query()->get($this->pageKey);
         $pageToken = (is_string($rawPage) && $rawPage !== '') ? $rawPage : $this->defaultPageToken;
+
+        // page=board/b/thread/4 (UrlGenerator::toPagePath()): the first segment
+        // is the page, the others are its tail, as in rewrite mode.
+        if (str_contains($pageToken, '/')) {
+            $segments  = array_values(array_filter(explode('/', $pageToken), static fn (string $s): bool => $s !== ''));
+            $pageToken = array_shift($segments) ?? $this->defaultPageToken;
+            $current->setTail($segments);
+        }
 
         $current->set($this->pageKey, $pageToken);
         $request->query()->set($this->pageKey, $pageToken);

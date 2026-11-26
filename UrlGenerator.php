@@ -93,6 +93,36 @@ final class UrlGenerator
     }
 
     /**
+     * Build the URL of a place below a page: a board, a thread, a wiki page.
+     *
+     *   rewrite: /en/board/b/thread/4?quote=5
+     *   query:   index.php?lang=en&page=board%2Fb%2Fthread%2F4&quote=5
+     *
+     * The router hands the segments to the page's controller as its tail
+     * (CurrentUrl::tailSegment()) in both modes. Appending "/b" to toPage()
+     * instead only works with rewriting: in query mode the segment lands on
+     * whatever parameter came last.
+     *
+     * @param list<string>          $segments    raw segment values (encoded here)
+     * @param array<string, scalar> $queryParams
+     */
+    public function toPagePath(string $resolvedUrlId, array $segments, array $queryParams = [], bool $includeSid = true): string
+    {
+        $segments = array_values(array_filter($segments, static fn (string $s): bool => $s !== ''));
+        if ($segments === []) {
+            return $this->toPage($resolvedUrlId, $queryParams, $includeSid);
+        }
+        [$urlRewrite] = $this->routingConfig();
+        if (!$urlRewrite) {
+            return $this->toPage($resolvedUrlId . '/' . implode('/', $segments), $queryParams, $includeSid);
+        }
+        $page = $this->toPage($resolvedUrlId, [], $includeSid);
+        $path = implode('/', array_map('rawurlencode', $segments));
+        $extra = $queryParams !== [] ? '?' . http_build_query($queryParams) : '';
+        return $page . '/' . $path . $extra;
+    }
+
+    /**
      * Build a page URL with pagination/filter sub-params.
      *
      * In rewrite mode, sub-params become positional path segments:
