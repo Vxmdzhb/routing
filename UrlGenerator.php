@@ -10,9 +10,16 @@ use AstrX\Config\Config;
  *
  * Two methods:
  *
- *   toPage($resolvedUrlId, $queryParams)
- *     — bare page URL, query params always appended as ?key=val.
+ *   toPage($resolvedUrlId, $params)
+ *     — a page URL with its parameters.
+ *     — Rewrite mode: parameters become name/value path segments,
+ *       /en/admin-users/edit/5 (PathParameters says which values can).
+ *     — Query mode: ?key=val, as always.
  *     — Used by: NavbarHandler, form actions, anywhere linking to a page root.
+ *
+ *   toPagePath($resolvedUrlId, $segments, $queryParams)
+ *     — a place below a page whose controller reads positions (a board's
+ *       thread, a username); its parameters stay in the query string.
  *
  *   toSubPage($resolvedUrlId, $page, $order, $perPage, $defaultPage,
  *             $defaultOrder, $defaultPerPage)
@@ -51,9 +58,16 @@ final class UrlGenerator
     // -------------------------------------------------------------------------
 
     /**
-     * Build the URL for a page root (no sub-params).
+     * Build the URL of a page with its parameters.
      *
-     * @param array<string, scalar> $queryParams Always appended as ?key=val.
+     * In rewrite mode each parameter that can be a path segment is written as
+     * /name/value after the page (PathParameters::split()); the others, and
+     * every parameter in query mode, go in the query string. The router reads
+     * both back the same way, so a controller does not care which form a URL
+     * had. Do not use this for a page whose controller reads positional path
+     * segments (AstrX\Kernel\ReadsPathSegments): use toPagePath().
+     *
+     * @param array<string, scalar> $queryParams
      */
     public function toPage(string $resolvedUrlId, array $queryParams = [], bool $includeSid = true): string
     {
@@ -66,15 +80,16 @@ final class UrlGenerator
         // EmailService::buildTokenLink and the sitemap/feed sid-free policy).
         if (!$includeSid) { $sid = ''; }
 
-        $extra = $queryParams !== [] ? '?' . http_build_query($queryParams) : '';
-
         if ($urlRewrite) {
+            [$pairs, $rest] = PathParameters::split($queryParams, $this->reservedKeys());
+            $extra = $rest !== [] ? '?' . http_build_query($rest) : '';
             $base = rtrim($basePath, '/');
             // Segment order MUST match the router: [locale] / [sid] / page / tail
             $segs = [];
             if ($locale !== '') { $segs[] = $locale; }
             if ($sid    !== '') { $segs[] = $sid; }
             $segs[] = $resolvedUrlId;
+            foreach ($pairs as $pair) { $segs[] = rawurlencode($pair); }
             return $this->withRoutePrefix($base . '/' . implode('/', $segs) . $extra);
         }
 
@@ -103,23 +118,80 @@ final class UrlGenerator
      * instead only works with rewriting: in query mode the segment lands on
      * whatever parameter came last.
      *
+     * A controller that also reads name/value pairs after its own positions
+     * (it knows where they start) passes $pathParams: the parameters that can
+     * be segments then follow the positions, /en/board/b/thread/4/quote/12.
+     *
      * @param list<string>          $segments    raw segment values (encoded here)
      * @param array<string, scalar> $queryParams
      */
-    public function toPagePath(string $resolvedUrlId, array $segments, array $queryParams = [], bool $includeSid = true): string
+    public function toPagePath(string $resolvedUrlId, array $segments, array $queryParams = [], bool $includeSid = true, bool $pathParams = false): string
     {
         $segments = array_values(array_filter($segments, static fn (string $s): bool => $s !== ''));
-        if ($segments === []) {
-            return $this->toPage($resolvedUrlId, $queryParams, $includeSid);
-        }
         [$urlRewrite] = $this->routingConfig();
         if (!$urlRewrite) {
-            return $this->toPage($resolvedUrlId . '/' . implode('/', $segments), $queryParams, $includeSid);
+            $page = $segments === [] ? $resolvedUrlId : $resolvedUrlId . '/' . implode('/', $segments);
+            return $this->toPage($page, $queryParams, $includeSid);
         }
+        // The page reads positions, so its parameters stay in the query string
+        // even with no segment: /en/board?style=x, not /en/board/style/x.
         $page = $this->toPage($resolvedUrlId, [], $includeSid);
-        $path = implode('/', array_map('rawurlencode', $segments));
+        if ($pathParams) {
+            [$pairs, $queryParams] = PathParameters::split($queryParams, $this->reservedKeys());
+            $segments = [...$segments, ...$pairs];
+        }
+        $path = $segments !== [] ? '/' . implode('/', array_map('rawurlencode', $segments)) : '';
         $extra = $queryParams !== [] ? '?' . http_build_query($queryParams) : '';
-        return $page . '/' . $path . $extra;
+        return $page . $path . $extra;
+    }
+
+    /**
+     * Add parameters to a URL made by toPage(), the way toPage() would have
+     * written them: path pairs in rewrite mode (before any query string the
+     * URL already has), the query string otherwise.
+     *
+     * @param array<string, scalar> $params
+     */
+    public function withParams(string $pageUrl, array $params): string
+    {
+        if ($params === []) {
+            return $pageUrl;
+        }
+        [$urlRewrite] = $this->routingConfig();
+        [$path, $query] = array_pad(explode('?', $pageUrl, 2), 2, '');
+        $rest = $params;
+        if ($urlRewrite) {
+            [$pairs, $rest] = PathParameters::split($params, $this->reservedKeys());
+            if ($pairs !== []) {
+                $path = rtrim($path, '/') . '/' . implode('/', array_map('rawurlencode', $pairs));
+            }
+        }
+        if ($rest !== []) {
+            $query = ($query !== '' ? $query . '&' : '') . http_build_query($rest);
+        }
+        return $query !== '' ? $path . '?' . $query : $path;
+    }
+
+    /**
+     * A URL made by toPage() followed by the start of one more parameter, for
+     * a template that appends the value itself ({{edit_url_prefix}}{{id}}):
+     * ".../edit/" in rewrite mode, "...&edit=" otherwise. The value must be
+     * one PathParameters accepts as a segment (an id, a slug) and be URL-encoded.
+     */
+    public function paramPrefix(string $pageUrl, string $name): string
+    {
+        [$urlRewrite] = $this->routingConfig();
+        if ($urlRewrite && !str_contains($pageUrl, '?') && PathParameters::isPathName($name, $this->reservedKeys())) {
+            return rtrim($pageUrl, '/') . '/' . $name . '/';
+        }
+        return $pageUrl . (str_contains($pageUrl, '?') ? '&' : '?') . rawurlencode($name) . '=';
+    }
+
+    /** @return list<string> the router's own query names, which never become segments */
+    private function reservedKeys(): array
+    {
+        [, , $localeKey, $pageKey, , , $sessionKey] = $this->routingConfig();
+        return [$localeKey, $sessionKey, $pageKey];
     }
 
     /**
